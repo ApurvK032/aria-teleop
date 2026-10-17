@@ -12,6 +12,8 @@ dependencies = [
 
 [project.optional-dependencies]
 aria = ["projectaria-client-sdk"]
+# The driver's major.minor must match the arm controller's firmware (1.8.x here).
+arm = ["trossen-arm>=1.8,<1.9"]
 test = ["pytest"]
 
 [build-system]

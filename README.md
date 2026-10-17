@@ -92,7 +92,14 @@ The live Aria path has been tested against the real SDK types but not against re
 | `--hand` | `right` | hand that drives the arm |
 | `--scale` | `1.0` | robot metres per hand metre (below 1 for precision) |
 | `--no-rotation` | off | follow position only, keep the gripper orientation fixed |
+| `--rotation-scale` | `1.0` | gripper turn per wrist turn; below 1 is calmer, with less range per engage (re-engage to turn further) |
+| `--rotation-deadband` | `0` | degrees of wrist turn from the engage pose to ignore, so the wrist's own small twists while you move don't turn the gripper; it's soft, so nothing jumps past it |
+| `--pivot-offset` | `0` | turn the gripper about a point this many metres behind its tip, the way your hand turns about your wrist; `0.156` is the arm's last wrist joint, `0` turns it about the fingertips |
 | `--max-speed` | `0.6` | end-effector speed cap, m/s |
+| `--max-angular-speed` | `4.0` | gripper turn-speed cap, rad/s |
+| `--joint-speed-limit` | none | sim: warn when a joint moves faster than this, rad/s (one value, or six comma-separated for joint_0..5) |
+| `--cap-joint-speed` | off | sim: also hold the IK to `--joint-speed-limit` |
+| `--joint-limit-margin` | `5` | sim: warn when a joint gets this many degrees from the end of its range |
 | `--interface` | `usb` | `wifi_sta` / `wifi_sap` add latency; use USB for teleop |
 | `--no-start-streaming` | off | only run the receiver, if you started streaming with `aria_gen2 streaming start` |
 | `--hand-viewer` | off | Rerun window with the tracked hands; `--hand-viewer-memory` caps its memory (default `1GB`) |
@@ -100,6 +107,48 @@ The live Aria path has been tested against the real SDK types but not against re
 | `--headless --duration 10 --auto-engage 1` | | run without the viewer, for testing |
 
 The rest (filter cutoffs, glitch threshold, workspace box, reach limit) are in `TeleopConfig` in `aria_teleop/mapping.py`.
+
+If the gripper turns too much or when you don't mean it, a starting point measured on one operator is `--rotation-scale 0.5 --rotation-deadband 5 --max-angular-speed 2`. Their wrist twisted by itself about 6–9 degrees while they moved their hand, and held-still jitter was about 0.5 degrees. Try `--pivot-offset 0.156` against `0` to see which feels more like your own hand.
+
+### Simulated vs. real arm
+
+The simulator lets joints move as fast as the IK asks; the real arm has per-joint speed limits and faults with `joint_limit_exceeded`. To see trouble before it reaches hardware, watch `joints 0.21/0.74rad/s limit j3 23deg` in the status line. It shows the peak shoulder/elbow and wrist joint speeds over the last second, and the joint closest to the end of its range. While you're driving the arm, a `WARNING joints:` line appears when a joint passes `--joint-speed-limit` or comes within `--joint-limit-margin` of its range end. The run ends with each joint's peak speed. Read the real limits from the arm with `TrossenArmDriver.get_joint_limits()` (`velocity_max`), then pass them as `--joint-speed-limit`. Add `--cap-joint-speed` to make the sim move only as fast as the real arm could; the arm then lags fast hand motion instead of whipping. With `--pivot-offset 0` (turning about the fingertips), wrist turns swing the shoulder and elbow several times harder than with `0.156`.
+
+## Real arm
+
+`--arm` chooses where joint commands come from and go to:
+
+| `--arm` | What happens |
+|---|---|
+| `sim` (default) | The simulator's own IK drives the MuJoCo arm, as before |
+| `preview` | The real-arm pipeline drives the MuJoCo arm: use it to see what the real arm will be sent |
+| `dry-run` | Connects to the real arm, reads its state and limits, and computes every command, but never switches the joints to position mode or sends anything; the viewer shows the commands |
+| `real` | Drives the real arm. Needs `--enable-motion` |
+
+The pipeline (`aria_teleop/arm.py`) runs at a fixed 200 Hz, separate from the 30 Hz hand stream, so input timing never reaches the motors:
+
+```
+target pose -> PoseSmoother -> IK (on a kinematic model) -> JointShaper -> safety gate -> arm
+```
+
+`JointShaper` follows the IK solution like a critically damped spring that matches the target's velocity. It caps every joint's velocity, acceleration and jerk, and never moves a joint faster than it can brake from before the target or the end of its range. On the mock it is 3–5x smoother than the simulator's own IK (RMS jerk), with about 2 mm more tracking error. Each command goes to the driver as a position goal 20 ms ahead, with velocity and acceleration feedforward.
+
+Safety:
+
+- the driver's major.minor must match the arm's firmware (`pip install -e ".[arm]"` installs a 1.8.x driver), or nothing starts;
+- an unreachable arm fails within 3 s with a message, instead of hanging;
+- start-up is a slow (3 s) blocking move from wherever the arm is to the teleop home pose; exit, Ctrl+C or any fault holds the arm and then moves it slowly to rest (all zeros);
+- a gate independent of the shaper rejects any command that is non-finite, outside a joint's range, or a larger step than the speed caps allow;
+- if the arm stays more than 0.12 rad from its command for 50 ms, teleop stops (hold, then rest);
+- joint speeds are capped at `--arm-max-velocity` (default 1.0 rad/s for the shoulder/elbow joints, 2.0 for the wrist) and at `--arm-velocity-fraction` (0.5) of the `velocity_max` each joint reports.
+
+Clutch release, closed eyes and a lost hand all hold the target, and the shaper brings the joints to a smooth stop. First session with the arm, power cut-off within reach:
+
+```bash
+python -m aria_teleop --source aria --clutch eyes --arm preview      # check the motion in MuJoCo
+python -m aria_teleop --source aria --clutch eyes --arm dry-run --robot-ip 192.168.1.2
+python -m aria_teleop --source aria --clutch eyes --arm real --enable-motion --robot-ip 192.168.1.2
+```
 
 ## Tests
 

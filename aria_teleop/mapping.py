@@ -3,10 +3,13 @@
 No simulator dependency, so the same mapper can later drive the real WidowX AI.
 
 Mapping (all relative to the moment the clutch engages):
-    p_target = p_E0 + scale * A @ (p_wrist - p_wrist0)
-    R_target = A @ (R_wrist @ R_wrist0^T) @ A^T @ R_E0
+    R_target = shape(A @ (R_wrist @ R_wrist0^T) @ A^T) @ R_E0
+    p_target = p_E0 - R_E0 @ d + scale * A @ (p_wrist - p_wrist0) + R_target @ d
 where A rotates room-frame vectors into the robot base frame, built from gravity
-and the direction the operator's head faces at engage time.
+and the direction the operator's head faces at engage time. shape() optionally
+applies a soft deadband and a gain to the rotation angle (identity by default).
+d = (pivot_offset_m, 0, 0) is the gripper tip seen from the point the gripper
+turns about; with d = 0 (the default) it turns about its tip.
 """
 
 from __future__ import annotations
@@ -35,6 +38,10 @@ class TeleopConfig:
     clutch: str = "key"
     scale: float = 1.0  # robot metres per hand metre
     use_rotation: bool = True  # False keeps the gripper orientation fixed
+    rotation_scale: float = 1.0  # gripper turn per wrist turn; below 1 is calmer but has less range per engage
+    rotation_deadband_deg: float = 0.0  # wrist turn from the engage pose that is ignored (soft: no jump past it)
+    pivot_offset_m: float = 0.0  # the gripper turns about a point this far behind its tip, like a hand
+    # about its wrist; 0.156 is the WidowX AI's last wrist joint. 0 turns it about the tip.
     yaw_offset_deg: float = 0.0  # set to 180 if you face the robot instead of standing behind it
     min_confidence: float = 0.3
     max_hand_speed: float = 3.0  # m/s; faster wrist jumps are treated as tracking glitches
@@ -88,6 +95,18 @@ def pinch_distance(hand: HandState | None) -> float | None:
     if hand is None or hand.landmarks_room is None or len(hand.landmarks_room) <= INDEX_TIP:
         return None
     return float(np.linalg.norm(hand.landmarks_room[THUMB_TIP] - hand.landmarks_room[INDEX_TIP]))
+
+
+def shape_rotation(R: np.ndarray, cfg: TeleopConfig) -> np.ndarray:
+    """Apply the soft deadband, then the gain, to a relative rotation's angle; the axis is kept."""
+    if cfg.rotation_scale == 1.0 and cfg.rotation_deadband_deg == 0.0:
+        return R
+    v = rotvec(R)
+    angle = float(np.linalg.norm(v))
+    shaped = min(max(0.0, angle - math.radians(cfg.rotation_deadband_deg)) * cfg.rotation_scale, math.pi)
+    if shaped == 0.0:
+        return np.eye(3)
+    return from_rotvec(v * (shaped / angle))
 
 
 def clamp_to_workspace(p: np.ndarray, cfg: TeleopConfig) -> np.ndarray:
@@ -300,11 +319,14 @@ class TeleopMapper:
             self.anchors += 1
         self._last_good_at = now
         a = self._anchor
-        self._target_p = clamp_to_workspace(
-            a.target_position + cfg.scale * a.A @ (p - a.wrist_position), cfg
-        )
         if cfg.use_rotation:
-            self._target_R = a.A @ (R @ a.wrist_rotation.T) @ a.A.T @ a.target_rotation
+            turn = shape_rotation(a.A @ (R @ a.wrist_rotation.T) @ a.A.T, cfg)  # in the robot base frame
+            self._target_R = turn @ a.target_rotation
+        # The wrist's motion moves the pivot; the tip sits pivot_offset_m ahead of it
+        # along the gripper's x axis, so turning about the pivot swings the tip.
+        tip = np.array([cfg.pivot_offset_m, 0.0, 0.0])
+        pivot = a.target_position - a.target_rotation @ tip + cfg.scale * a.A @ (p - a.wrist_position)
+        self._target_p = clamp_to_workspace(pivot + self._target_R @ tip, cfg)
         d = pinch_distance(hand)
         if d is not None:
             self.last_pinch = d
