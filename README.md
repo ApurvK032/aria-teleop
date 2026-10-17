@@ -61,6 +61,8 @@ A status line prints once a second:
 [  12.0s] tracking clutch=on  hands 30.0Hz head   800Hz conf 0.93 pinch  4.5cm target (+0.320,-0.050,+0.210) err   4.1mm rejected 0 anchors 1
 ```
 
+`--hand-viewer` opens a Rerun window with both tracked hands (after head-motion compensation, so turning your head shouldn't move them), the head pose, and live plots of confidence and pinch distance. You can read your pinch values there without engaging. The Rerun viewer takes about one CPU core, so on a slow laptop use it to check tracking and leave it off for teleop.
+
 ## First live run: things to check
 
 The live Aria path has been tested against the real SDK types but not against real glasses yet. Watch the status line for these:
@@ -81,6 +83,7 @@ The live Aria path has been tested against the real SDK types but not against re
 | `--max-speed` | `0.6` | end-effector speed cap, m/s |
 | `--interface` | `usb` | `wifi_sta` / `wifi_sap` add latency; use USB for teleop |
 | `--no-start-streaming` | off | only run the receiver, if you started streaming with `aria_gen2 streaming start` |
+| `--hand-viewer` | off | Rerun window with the tracked hands; `--hand-viewer-memory` caps its memory (default `1GB`) |
 | `--headless --duration 10 --auto-engage 1` | | run without the viewer, for testing |
 
 The rest (filter cutoffs, glitch threshold, workspace box, reach limit) are in `TeleopConfig` in `aria_teleop/mapping.py`.

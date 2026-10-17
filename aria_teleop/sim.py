@@ -18,6 +18,7 @@ from trossen_arm_mujoco.src.controller import Controller, RobotType
 
 from .fusion import HandFuser
 from .geometry import quat_wxyz
+from .hand_viewer import HandViewer
 from .mapping import PoseSmoother, Status, TeleopCommand, TeleopMapper
 
 SCENE = "assets/wxai/scene_wxai_follow_target.xml"
@@ -78,6 +79,7 @@ def run(
     auto_engage_after: float | None = None,
     clutch_key: int = ord(" "),
     status_period: float = 1.0,
+    hand_viewer: HandViewer | None = None,
 ) -> dict:
     """Real-time loop: map the latest hand frame, step physics to wall time, render."""
 
@@ -113,7 +115,10 @@ def run(
                 auto_engage_after = None
                 print("clutch ENGAGED (auto)")
 
-            cmd = mapper.update(fuser.latest(), now)
+            frame = fuser.latest()
+            cmd = mapper.update(frame, now)
+            if hand_viewer is not None:
+                hand_viewer.log(frame, now)
             steps = 0
             while sim_time < elapsed and steps < MAX_CATCHUP_STEPS:
                 sim.step(cmd)

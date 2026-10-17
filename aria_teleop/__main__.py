@@ -31,6 +31,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--pinch-closed", type=float, default=0.02, help="thumb-index distance (m) for closed gripper")
     p.add_argument("--pinch-open", type=float, default=0.08, help="thumb-index distance (m) for open gripper")
     p.add_argument("--max-speed", type=float, default=0.6, help="end-effector speed cap, m/s")
+    p.add_argument("--hand-viewer", action="store_true",
+                   help="open a Rerun window with the tracked hands, head pose, confidence and pinch")
+    p.add_argument("--hand-viewer-memory", default="1GB", help="memory limit for the Rerun hand viewer")
 
     aria = p.add_argument_group("aria source")
     aria.add_argument("--profile", default="profile9", help="streaming profile (profile9 = hands at 30 Hz)")
@@ -76,6 +79,11 @@ def main(argv: list[str] | None = None) -> None:
         )
     sim = WidowXSim(PoseSmoother(max_speed=args.max_speed))
     mapper = TeleopMapper(cfg, HOME_POSITION, HOME_ROTATION)
+    hand_viewer = None
+    if args.hand_viewer:
+        from .hand_viewer import HandViewer
+
+        hand_viewer = HandViewer(memory_limit=args.hand_viewer_memory)  # needs rerun-sdk ([aria] extra)
 
     print(__doc__)
     try:
@@ -95,6 +103,7 @@ def main(argv: list[str] | None = None) -> None:
             duration=args.duration,
             auto_engage_after=args.auto_engage,
             clutch_key=ord(args.clutch_key.upper()[0]),
+            hand_viewer=hand_viewer,
         )
     except KeyboardInterrupt:
         stats = None
