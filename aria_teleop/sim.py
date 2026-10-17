@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from importlib.resources import files
 import time
+from typing import Callable
 
 import mujoco
 import mujoco.viewer
@@ -29,8 +30,24 @@ STATUS_COLORS = {
     Status.IDLE: (0.6, 0.6, 0.6, 0.5),
     Status.TRACKING: (0.1, 0.8, 0.2, 0.6),
     Status.HOLD: (1.0, 0.55, 0.0, 0.7),
+    Status.PAUSED: (0.25, 0.45, 1.0, 0.7),
 }
 MAX_CATCHUP_STEPS = 50  # if the PC falls behind real time, drop the backlog instead of spiralling
+CLUTCH_MESSAGES = {  # clutch state -> (terminal line, words spoken on the glasses)
+    "engaged": ("clutch ENGAGED", "engaged"),
+    "paused": ("clutch paused: eyes closed or not tracked", "paused"),
+    "released": ("clutch released", "released"),
+    "armed": ("armed: wink your left eye to engage, your right eye to release", "armed"),
+    "disarmed": ("disarmed", "disarmed"),
+}
+
+
+def clutch_state(mapper: TeleopMapper, status: Status) -> str:
+    if mapper.engaged:
+        return "paused" if status is Status.PAUSED else "engaged"
+    if mapper.cfg.clutch == "eyes":
+        return "armed" if mapper.armed else "disarmed"
+    return "released"
 
 
 class WidowXSim:
@@ -80,13 +97,16 @@ def run(
     clutch_key: int = ord(" "),
     status_period: float = 1.0,
     hand_viewer: HandViewer | None = None,
+    announce: Callable[[str], None] | None = None,
 ) -> dict:
-    """Real-time loop: map the latest hand frame, step physics to wall time, render."""
+    """Real-time loop: map the latest hand frame, step physics to wall time, render.
+
+    Clutch changes are printed, and passed to ``announce`` (speech on the glasses).
+    """
 
     def on_key(keycode: int) -> None:
         if keycode == clutch_key:
-            mapper.toggle_clutch()
-            print(f"clutch {'ENGAGED' if mapper.engaged else 'released'}")
+            mapper.toggle_clutch()  # the loop reports the change
         elif keycode == ord("H"):
             mapper.reset_heading()
             print("heading reset: 'forward' = where you face at the next engage")
@@ -104,7 +124,8 @@ def run(
         start = time.monotonic()
         sim_time = 0.0
         last_sync = last_status = start
-        last_hand_frames, last_head_poses = fuser.hand_frames, fuser.head_poses
+        last_hand_frames, last_head_poses, last_eye_samples = fuser.hand_frames, fuser.head_poses, fuser.eyes.samples
+        last_clutch = clutch_state(mapper, mapper.status)
         while viewer is None or viewer.is_running():
             now = time.monotonic()
             elapsed = now - start
@@ -113,12 +134,21 @@ def run(
             if auto_engage_after is not None and elapsed >= auto_engage_after:
                 mapper.set_clutch(True)
                 auto_engage_after = None
-                print("clutch ENGAGED (auto)")
+                print("(auto-engage)")
 
-            frame = fuser.latest()
-            cmd = mapper.update(frame, now)
+            frame, eyes = fuser.latest(), fuser.eyes.state()
+            cmd = mapper.update(frame, now, eyes)
+            state = clutch_state(mapper, cmd.status)
+            if state != last_clutch:
+                line, spoken = CLUTCH_MESSAGES[state]
+                if state == "armed" and last_clutch in ("engaged", "paused"):
+                    line, spoken = "clutch released (still armed)", "released"
+                print(line)
+                if announce is not None:
+                    announce(spoken)
+                last_clutch = state
             if hand_viewer is not None:
-                hand_viewer.log(frame, now)
+                hand_viewer.log(frame, now, eyes)
             steps = 0
             while sim_time < elapsed and steps < MAX_CATCHUP_STEPS:
                 sim.step(cmd)
@@ -142,14 +172,18 @@ def run(
                 period = now - last_status
                 hand_hz = (fuser.hand_frames - last_hand_frames) / period
                 head_hz = (fuser.head_poses - last_head_poses) / period
+                eye_hz = (fuser.eyes.samples - last_eye_samples) / period
                 last_hand_frames, last_head_poses = fuser.hand_frames, fuser.head_poses
+                last_eye_samples = fuser.eyes.samples
                 last_status = now
                 conf = "  -  " if mapper.last_confidence is None else f"{mapper.last_confidence:.2f}"
                 pinch = "  -  " if mapper.last_pinch is None else f"{mapper.last_pinch * 100:4.1f}cm"
+                clutch = "on " if mapper.engaged else "arm" if mapper.armed else "off"
+                eye_rate = f" eyes {eye_hz:4.1f}Hz" if mapper.cfg.clutch == "eyes" else ""
                 x, y, z = cmd.position
                 print(
-                    f"[{elapsed:6.1f}s] {cmd.status.value:8s} clutch={'on ' if mapper.engaged else 'off'} "
-                    f"hands {hand_hz:4.1f}Hz head {head_hz:5.0f}Hz conf {conf} pinch {pinch} "
+                    f"[{elapsed:6.1f}s] {cmd.status.value:8s} clutch={clutch} "
+                    f"hands {hand_hz:4.1f}Hz head {head_hz:5.0f}Hz{eye_rate} conf {conf} pinch {pinch} "
                     f"target ({x:+.3f},{y:+.3f},{z:+.3f}) err {sim.tracking_error() * 1000:5.1f}mm "
                     f"rejected {mapper.rejected_frames} anchors {mapper.anchors}"
                 )

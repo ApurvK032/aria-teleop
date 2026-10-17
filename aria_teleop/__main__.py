@@ -4,6 +4,8 @@
     python -m aria_teleop --source aria     # live glasses over USB
 
 In the viewer, press SPACE to engage / release the clutch (or use --clutch pinch).
+With --clutch eyes, SPACE arms; then wink your left eye to engage and your right
+eye to release. Closing both eyes pauses the robot.
 """
 
 from __future__ import annotations
@@ -20,9 +22,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--source", choices=["mock", "aria"], default="mock")
     p.add_argument("--hand", choices=["right", "left"], default="right", help="hand that drives the arm")
-    p.add_argument("--clutch", choices=["key", "pinch"], default="key",
-                   help="key: SPACE in the viewer toggles; pinch: pinch the other hand to engage (deadman)")
-    p.add_argument("--clutch-key", default=" ", help="viewer key that toggles the clutch (default: space)")
+    p.add_argument("--clutch", choices=["key", "pinch", "eyes"], default="key",
+                   help="key: SPACE in the viewer toggles; pinch: pinch the other hand to engage (deadman); "
+                        "eyes: SPACE arms, left wink engages, right wink releases, both eyes closed pauses")
+    p.add_argument("--clutch-key", default=" ", help="viewer key that toggles (or, with eyes, arms) the clutch")
+    p.add_argument("--wink-s", type=float, default=0.6, help="eyes clutch: how long a wink must be held, s")
+    p.add_argument("--no-speak", action="store_true", help="eyes clutch: don't announce changes on the glasses")
     p.add_argument("--scale", type=float, default=1.0, help="robot metres per hand metre")
     p.add_argument("--no-rotation", action="store_true", help="follow position only, keep gripper orientation")
     p.add_argument("--yaw-offset", type=float, default=0.0,
@@ -64,6 +69,7 @@ def main(argv: list[str] | None = None) -> None:
         min_confidence=args.min_confidence,
         pinch_closed_m=args.pinch_closed,
         pinch_open_m=args.pinch_open,
+        wink_s=args.wink_s,
     )
     fuser = HandFuser()
     if args.source == "mock":
@@ -76,6 +82,7 @@ def main(argv: list[str] | None = None) -> None:
             interface=args.interface,
             device_ip=args.device_ip,
             start_streaming=not args.no_start_streaming,
+            eyes=args.clutch == "eyes",
         )
     sim = WidowXSim(PoseSmoother(max_speed=args.max_speed))
     mapper = TeleopMapper(cfg, HOME_POSITION, HOME_ROTATION)
@@ -104,6 +111,7 @@ def main(argv: list[str] | None = None) -> None:
             auto_engage_after=args.auto_engage,
             clutch_key=ord(args.clutch_key.upper()[0]),
             hand_viewer=hand_viewer,
+            announce=source.say if args.clutch == "eyes" and not args.no_speak else None,
         )
     except KeyboardInterrupt:
         stats = None

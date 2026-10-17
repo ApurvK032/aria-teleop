@@ -55,6 +55,18 @@ Before engaging, stand behind the arm facing the way it points. If you face the 
 
 `--clutch pinch` turns your other hand into a deadman switch: pinch it to drive, open it to stop.
 
+`--clutch eyes` drives the clutch with the glasses' on-device eye tracking:
+
+| Gesture | Action |
+|---|---|
+| `SPACE` in the viewer | arm / disarm. Disarmed, the robot never moves |
+| wink your left eye (hold ~0.6 s, right eye open) | engage |
+| wink your right eye | release |
+| close both eyes for longer than a blink (0.5 s) | pause at once: the robot holds; when you open your eyes it re-anchors, so hand motion you made without looking is ignored |
+| keep both eyes closed for 2 s | release |
+
+Losing eye-tracking data also pauses. The glasses say "engaged", "paused", "released" and so on (`--no-speak` turns this off), and the cube turns blue while paused. Tune the wink time with `--wink-s`. Ordinary blinks were measured at up to ~0.4 s, so they don't pause the robot. A wink only counts if the other eye stays open; if both eyes close together for 0.5 s, the gesture is treated as closed eyes, not a wink.
+
 A status line prints once a second:
 
 ```
@@ -84,6 +96,7 @@ The live Aria path has been tested against the real SDK types but not against re
 | `--interface` | `usb` | `wifi_sta` / `wifi_sap` add latency; use USB for teleop |
 | `--no-start-streaming` | off | only run the receiver, if you started streaming with `aria_gen2 streaming start` |
 | `--hand-viewer` | off | Rerun window with the tracked hands; `--hand-viewer-memory` caps its memory (default `1GB`) |
+| `--clutch eyes --wink-s 0.6` | | eye-gesture clutch, and how long a wink must be held |
 | `--headless --duration 10 --auto-engage 1` | | run without the viewer, for testing |
 
 The rest (filter cutoffs, glitch threshold, workspace box, reach limit) are in `TeleopConfig` in `aria_teleop/mapping.py`.

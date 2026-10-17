@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .eyes import EyeState
 from .fusion import HandFrame
 from .mapping import pinch_distance
 
@@ -40,12 +41,15 @@ class HandViewer:
         self._last_t_ns: int | None = None
         self._last_log = -np.inf
 
-    def log(self, frame: HandFrame | None, now: float) -> None:
+    def log(self, frame: HandFrame | None, now: float, eyes: EyeState | None = None) -> None:
         if frame is None or frame.t_ns == self._last_t_ns or now - self._last_log < self.period:
             return
         rr = self.rr
         self._last_t_ns, self._last_log = frame.t_ns, now
         rr.set_time("device_time", duration=frame.t_ns * 1e-9)
+        if eyes is not None:
+            for name in ("left_closed_s", "right_closed_s", "both_closed_s"):
+                rr.log(f"plots/eyes/{name}", rr.Scalars(getattr(eyes, name)))
         T = frame.T_room_head
         rr.log("room/head", rr.Transform3D(translation=T[:3, 3], mat3x3=T[:3, :3]), rr.TransformAxes3D(0.1))
         for side, color in COLORS.items():
