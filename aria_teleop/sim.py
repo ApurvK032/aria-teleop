@@ -143,7 +143,7 @@ def run(
                 line, spoken = CLUTCH_MESSAGES[state]
                 if state == "armed" and last_clutch in ("engaged", "paused"):
                     line, spoken = "clutch released (still armed)", "released"
-                print(line)
+                print(f"[{elapsed:6.1f}s] {line}")
                 if announce is not None:
                     announce(spoken)
                 last_clutch = state
