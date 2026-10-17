@@ -143,6 +143,9 @@ def run(
                 line, spoken = CLUTCH_MESSAGES[state]
                 if state == "armed" and last_clutch in ("engaged", "paused"):
                     line, spoken = "clutch released (still armed)", "released"
+                if mapper.cfg.clutch == "eyes" and eyes is not None:  # what triggered it
+                    line += (f"  [eyes closed L{eyes.left_closed_s:.2f} R{eyes.right_closed_s:.2f} "
+                             f"both{eyes.both_closed_s:.2f} s]")
                 print(f"[{elapsed:6.1f}s] {line}")
                 if announce is not None:
                     announce(spoken)
