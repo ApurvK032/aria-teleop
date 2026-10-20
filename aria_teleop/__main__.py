@@ -3,7 +3,8 @@
     python -m aria_teleop --source mock     # no glasses: scripted hand motion
     python -m aria_teleop --source aria     # live glasses over USB
 
-In the viewer, press SPACE to engage / release the clutch (or use --clutch pinch).
+In the viewer or the terminal, press SPACE to engage / release the clutch (or use
+--clutch pinch); in the terminal this also works with --headless.
 With --clutch eyes, SPACE arms; then wink your left eye to engage and your right
 eye to release. Closing both eyes pauses the robot.
 """

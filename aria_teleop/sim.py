@@ -7,8 +7,12 @@ changes colour with the teleop status.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from importlib.resources import files
+import os
+import select
+import sys
+import threading
 import time
 from typing import Callable, Sequence
 
@@ -42,6 +46,42 @@ CLUTCH_MESSAGES = {  # clutch state -> (terminal line, words spoken on the glass
     "armed": ("armed: wink your left eye to engage, your right eye to release", "armed"),
     "disarmed": ("disarmed", "disarmed"),
 }
+
+
+@contextmanager
+def terminal_keys(on_key: Callable[[int], None]):
+    """Pass single key presses in the terminal to ``on_key``, so SPACE and H work without the viewer.
+
+    The terminal goes into cbreak mode (no line buffering or echo; Ctrl+C still interrupts)
+    and is restored on exit. Does nothing when stdin isn't a terminal.
+    """
+    if not sys.stdin.isatty():
+        yield
+        return
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    stop = threading.Event()
+
+    def read_keys() -> None:
+        while not stop.is_set():
+            if select.select([fd], [], [], 0.1)[0]:
+                key = os.read(fd, 1)
+                if key:
+                    on_key(ord(chr(key[0]).upper()))  # same codes as the viewer: SPACE 32, H 72
+
+    tty.setcbreak(fd)
+    thread = threading.Thread(target=read_keys, daemon=True)
+    thread.start()
+    print("terminal keys: SPACE toggles the clutch (arms with --clutch eyes), H resets heading, Ctrl+C stops")
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(0.5)
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
 
 
 def clutch_state(mapper: TeleopMapper, status: Status) -> str:
@@ -171,7 +211,7 @@ def run(
     margin_rad = np.radians(joint_limit_margin_deg)
     win_speed = np.zeros(len(JOINT_NAMES))  # peak joint speeds and closest range margins while
     win_margin = np.full(len(JOINT_NAMES), np.inf)  # driving the arm, since the last status line
-    with viewer_ctx as viewer:
+    with viewer_ctx as viewer, terminal_keys(on_key):
         if viewer is not None:
             viewer.cam.lookat[:] = [0.3, 0.0, 0.15]
             viewer.cam.distance = 1.0

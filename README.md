@@ -46,10 +46,12 @@ Then with the glasses plugged in over USB:
 python -m aria_teleop --source aria
 ```
 
-| Key in the viewer | Action |
+| Key in the viewer or the terminal | Action |
 |---|---|
 | `SPACE` | engage / release the clutch |
 | `H` | reset heading: "forward" is taken from where you face at the next engage |
+
+The terminal keys also work with `--headless`, so you can drive the real arm without a viewer window.
 
 Before engaging, stand behind the arm facing the way it points. If you face the robot instead, add `--yaw-offset 180`. Keep your hand where the glasses can see it.
 
