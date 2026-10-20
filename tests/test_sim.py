@@ -7,9 +7,9 @@ pytest.importorskip("mujoco")
 pytest.importorskip("trossen_arm_mujoco")
 
 from aria_teleop.fusion import HandFuser  # noqa: E402
-from aria_teleop.geometry import heading_frame  # noqa: E402
-from aria_teleop.mapping import PoseSmoother, Status, TeleopConfig, TeleopMapper  # noqa: E402
-from aria_teleop.sim import HOME_POSITION, HOME_ROTATION, WidowXSim  # noqa: E402
+from aria_teleop.geometry import heading_frame, rot_y  # noqa: E402
+from aria_teleop.mapping import PoseSmoother, Status, TeleopCommand, TeleopConfig, TeleopMapper  # noqa: E402
+from aria_teleop.sim import HOME_POSITION, HOME_ROTATION, WidowXSim, run  # noqa: E402
 from aria_teleop.sources import MockSource  # noqa: E402
 
 
@@ -65,3 +65,45 @@ def test_noisy_stream_stays_stable():
     assert step.max() < 0.05  # no glitch made it through as a jump
     tracking = [e for _, cmd, _, e in log if cmd.status is Status.TRACKING]
     assert np.mean(tracking) < 0.015
+
+
+def peak_joint_speed_for_a_sudden_wrist_bend(cap):
+    sim = WidowXSim(PoseSmoother(max_angular_speed=10.0), joint_speed_limit=0.5)
+    home = TeleopCommand(HOME_POSITION, HOME_ROTATION, 0.5, Status.TRACKING)
+    for _ in range(1000):  # walk to home uncapped
+        sim.step(home)
+    sim.cap_joint_speed = cap
+    bend = TeleopCommand(HOME_POSITION, rot_y(-0.5) @ HOME_ROTATION, 0.5, Status.TRACKING)
+    peak = np.zeros(6)
+    for _ in range(500):
+        sim.step(bend)
+        peak = np.maximum(peak, sim.joint_speeds())
+    return peak.max()
+
+
+def test_joint_speed_cap_holds_joints_to_the_limit():
+    assert peak_joint_speed_for_a_sudden_wrist_bend(cap=False) > 2.0  # what the IK asks for
+    assert peak_joint_speed_for_a_sudden_wrist_bend(cap=True) <= 0.5
+
+
+def test_joint_margins_measure_distance_to_the_range_ends():
+    sim = WidowXSim(PoseSmoother())
+    q = sim.data.qpos[sim._qpos]
+    expected = np.minimum(q - sim.joint_range[:, 0], sim.joint_range[:, 1] - q)
+    np.testing.assert_allclose(sim.joint_margins(), expected)
+    assert sim.joint_margins()[1] == pytest.approx(0.0)  # starts folded, shoulder at the end of its range
+
+
+def test_run_warns_when_a_joint_is_too_fast(capsys):
+    fuser = HandFuser()
+    source = MockSource(fuser)
+    sim = WidowXSim(PoseSmoother(), joint_speed_limit=0.01)
+    mapper = TeleopMapper(TeleopConfig(), HOME_POSITION, HOME_ROTATION)
+    source.start()
+    try:
+        stats = run(sim, mapper, fuser, headless=True, duration=2.5, auto_engage_after=0.2)
+    finally:
+        source.stop()
+    out = capsys.readouterr().out
+    assert "WARNING joints:" in out and "rad/s >" in out
+    assert stats["speed_warnings"] >= 1 and stats["joint_speed_peak"].max() > 0.01

@@ -20,6 +20,7 @@ from typing import Callable
 
 import numpy as np
 
+from .eyes import EyeTracker
 from .geometry import interpolate_transform
 
 GRAVITY_DEFAULT = np.array([0.0, 0.0, -9.81])
@@ -103,6 +104,7 @@ class HandFuser:
         self._T_device_head = np.eye(4)
         self._latest: HandFrame | None = None
         self._clock = clock
+        self.eyes = EyeTracker(clock=clock)  # fed by sources that stream eye tracking
         self.hand_frames = 0
         self.head_poses = 0
         self.frames_without_pose = 0

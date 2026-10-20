@@ -29,7 +29,8 @@ class AriaSource:
     Starts streaming on the glasses (unless ``start_streaming`` is False, e.g.
     when you started it with ``aria_gen2 streaming start``), then runs the
     SDK's HTTP receiver. Prefers the ~800 Hz high-frequency VIO pose and falls
-    back to the 10 Hz VIO output if the profile does not stream it.
+    back to the 10 Hz VIO output if the profile does not stream it. With
+    ``eyes=True`` it also feeds on-device eye tracking to ``fuser.eyes``.
     """
 
     INTERFACES = ("usb", "wifi_sta", "wifi_sap")
@@ -44,6 +45,7 @@ class AriaSource:
         start_streaming: bool = True,
         port: int = 6768,
         min_pose_quality: float = 0.5,
+        eyes: bool = False,
     ):
         if interface not in self.INTERFACES:
             raise ValueError(f"interface must be one of {self.INTERFACES}")
@@ -55,10 +57,22 @@ class AriaSource:
         self.start_streaming = start_streaming
         self.port = port
         self.min_pose_quality = min_pose_quality
+        self.eyes = eyes
+        self._client = None  # must outlive the device: a collected client closes its connection
         self._device = None
         self._receiver = None
         self._have_high_freq = False
         self._callback_errors: set[str] = set()
+        self._speech: str | None = None
+        self._speech_ready = threading.Event()
+
+    def _connect(self):
+        import aria.sdk_gen2 as sdk_gen2
+
+        self._client = sdk_gen2.DeviceClient()
+        self._client.set_client_config(sdk_gen2.DeviceClientConfig())
+        target = sdk_gen2.DeviceTarget(ip=self.device_ip) if self.device_ip else sdk_gen2.DeviceTarget()
+        return self._client.connect(target)
 
     def start(self) -> None:
         import aria.sdk_gen2 as sdk_gen2
@@ -69,12 +83,7 @@ class AriaSource:
         self._vio_good = TrackingQuality.GOOD
 
         if self.start_streaming:
-            client = sdk_gen2.DeviceClient()
-            client.set_client_config(sdk_gen2.DeviceClientConfig())
-            if self.device_ip:
-                self._device = client.connect(sdk_gen2.DeviceTarget(ip=self.device_ip))
-            else:
-                self._device = client.connect()
+            self._device = self._connect()
             config = sdk_gen2.HttpStreamingConfig()
             if self.profile_json:
                 config.profile_json = self.profile_json
@@ -88,6 +97,7 @@ class AriaSource:
             self._device.set_streaming_config(config)
             self._device.start_streaming()
             print(f"Aria: streaming started ({self.profile_json or self.profile}, {self.interface})")
+            threading.Thread(target=self._speech_loop, daemon=True).start()
 
         server = sdk_gen2.HttpServerConfig()
         server.address = "0.0.0.0"  # 127.0.0.1 never sees the glasses' connection
@@ -98,20 +108,49 @@ class AriaSource:
         self._receiver.register_vio_high_frequency_callback(self._guard("vio_hf", self._on_vio_high_freq))
         self._receiver.register_vio_callback(self._guard("vio", self._on_vio))
         self._receiver.register_device_calib_callback(self._guard("calib", self._on_calib))
+        if self.eyes:
+            self._receiver.register_eye_gaze_callback(self._guard("eyes", self._on_eyes))
         self._receiver.start_server()
         print(f"Aria: receiver listening on 0.0.0.0:{self.port}")
 
     def stop(self) -> None:
         if self._device is not None:
+            device, self._device = self._device, None  # also stops the speech thread
+            self._speech_ready.set()
             try:
-                self._device.stop_streaming()
-            except Exception as e:  # keep shutting down the receiver regardless
-                print(f"Aria: stop_streaming failed: {e}")
+                device.stop_streaming()
+            except Exception as e:  # retry once on a fresh connection, then give up
+                print(f"Aria: stop_streaming failed ({e}); retrying on a new connection")
+                try:
+                    self._connect().stop_streaming()
+                except Exception as e2:
+                    print(f"Aria: stop_streaming failed again: {e2}. Run `aria_gen2 streaming stop`.")
             time.sleep(1.0)
-            self._device = None
+            self._client = None
         if self._receiver is not None:
             self._receiver.stop_server()
             self._receiver = None
+
+    def say(self, text: str) -> None:
+        """Speak through the glasses' speaker, without blocking; a newer message replaces an unsent one."""
+        self._speech = text
+        self._speech_ready.set()
+
+    def _speech_loop(self) -> None:
+        while True:
+            self._speech_ready.wait()
+            self._speech_ready.clear()
+            device, text, self._speech = self._device, self._speech, None
+            if device is None:
+                return
+            if text is None:
+                continue
+            try:
+                device.render_tts(text)
+            except Exception as e:
+                if "tts" not in self._callback_errors:
+                    self._callback_errors.add("tts")
+                    print(f"Aria: text-to-speech failed (further errors suppressed): {e!r}")
 
     def _guard(self, name, fn):
         """SDK threads swallow or crash on exceptions; report each kind once instead."""
@@ -166,6 +205,15 @@ class AriaSource:
     def _on_calib(self, calib) -> None:
         self.fuser.set_device_to_head(calib.get_transform_device_cpf().to_matrix())
 
+    def _on_eyes(self, gaze) -> None:
+        v = gaze.vergence
+        # Despite the names, *_blink reads 1 while that eye is open (see eyes.py).
+        self.fuser.eyes.on_sample(
+            _timedelta_ns(gaze.tracking_timestamp),
+            bool(v.left_blink) if v.left_blink_valid else None,
+            bool(v.right_blink) if v.right_blink_valid else None,
+        )
+
 
 # Device axes expressed in the room frame for a level head facing room +x:
 # camera-style x right, y down, z forward.
@@ -177,7 +225,8 @@ class MockSource:
 
     The head yaws back and forth on purpose. If head-motion compensation works,
     the robot traces the scripted path and ignores the sway. Adds noise,
-    dropouts and occasional glitches so the gating gets exercised too.
+    dropouts and occasional glitches so the gating gets exercised too. The eyes
+    stay open apart from ordinary blinks, which must never pause the robot.
     """
 
     def __init__(
@@ -191,10 +240,14 @@ class MockSource:
         glitch: float = 0.005,
         head_yaw_deg: float = 20.0,
         clutch_pinch: bool = False,
+        blink_every_s: float = 3.7,
+        blink_s: float = 0.3,
         seed: int = 0,
     ):
         self.fuser = fuser
         self.hand = hand
+        self.blink_every_s = blink_every_s
+        self.blink_s = blink_s
         self.hand_rate_hz = hand_rate_hz
         self.head_rate_hz = head_rate_hz
         self.noise_m = noise_m
@@ -224,6 +277,9 @@ class MockSource:
     @staticmethod
     def pinch(t: float) -> float:
         return 0.05 + 0.035 * np.sin(2 * np.pi * t / 5.0)
+
+    def eyes_open(self, t: float) -> bool:
+        return t % self.blink_every_s >= self.blink_s
 
     def observe(self, t: float) -> dict[str, HandObservation]:
         """What the glasses would report at time ``t`` (device frame, with noise)."""
@@ -262,6 +318,9 @@ class MockSource:
         if self._thread is not None:
             self._thread.join(timeout=1.0)
 
+    def say(self, text: str) -> None:
+        pass  # no speaker on the mock; the run loop prints state changes anyway
+
     def _loop(self) -> None:
         t0 = time.monotonic()
         next_head = next_hand = 0.0
@@ -272,5 +331,7 @@ class MockSource:
                 next_head += 1.0 / self.head_rate_hz
             if t >= next_hand:
                 self.fuser.on_hands(int(t * 1e9), self.observe(t))
+                is_open = self.eyes_open(t)
+                self.fuser.eyes.on_sample(int(t * 1e9), is_open, is_open)
                 next_hand += 1.0 / self.hand_rate_hz
             time.sleep(max(0.0, min(next_head, next_hand) - (time.monotonic() - t0)))

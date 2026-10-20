@@ -119,6 +119,48 @@ def test_no_rotation_keeps_orientation():
     np.testing.assert_allclose(cmd.rotation, np.eye(3))
 
 
+def test_rotation_scale_scales_the_turn():
+    m = engaged_mapper(rotation_scale=0.5)
+    _, t = feed(m, 0.0, 5, wrist=WRIST0)
+    cmd, _ = feed(m, t, 90, wrist=WRIST0, R=rot_z(0.4))
+    assert rotation_angle(cmd.rotation.T @ rot_z(0.2)) < 2e-3
+
+
+@pytest.mark.parametrize("wrist_deg, gripper_deg", [(4.0, 0.0), (5.5, 0.5), (15.0, 10.0)])
+def test_rotation_deadband_is_soft(wrist_deg, gripper_deg):
+    m = engaged_mapper(rotation_deadband_deg=5.0)
+    _, t = feed(m, 0.0, 5, wrist=WRIST0)
+    cmd, _ = feed(m, t, 90, wrist=WRIST0, R=rot_z(np.radians(wrist_deg)))
+    assert rotation_angle(cmd.rotation.T @ rot_z(np.radians(gripper_deg))) < np.radians(0.2)
+
+
+def test_pivot_offset_turns_the_gripper_about_its_wrist():
+    turn = rot_z(0.5)
+    for offset in (0.0, 0.156):
+        m = engaged_mapper(pivot_offset_m=offset)
+        _, t = feed(m, 0.0, 5, wrist=WRIST0)
+        cmd, t = feed(m, t, 90, wrist=WRIST0, R=turn)  # wrist turns in place
+        pivot = HOME - [offset, 0.0, 0.0]
+        np.testing.assert_allclose(cmd.position, pivot + turn @ [offset, 0.0, 0.0], atol=1e-3)
+        # Re-engaging with the gripper turned doesn't move it.
+        m.set_clutch(False)
+        cmd, t = feed(m, t, 2, wrist=WRIST0, R=turn)
+        held = cmd.position.copy()
+        m.set_clutch(True)
+        cmd, _ = feed(m, t, 30, wrist=WRIST0, R=turn)
+        np.testing.assert_allclose(cmd.position, held, atol=1e-6)
+
+
+def test_angular_speed_cap():
+    s = PoseSmoother(max_angular_speed=2.0)
+    s.reset(HOME, np.eye(3))
+    _, R = s.step(HOME, rot_z(1.0), 0.01)
+    assert rotation_angle(R) <= 0.02 + 1e-9
+    for _ in range(60):
+        _, R = s.step(HOME, rot_z(1.0), 0.01)
+    assert rotation_angle(R.T @ rot_z(1.0)) < 1e-6
+
+
 def test_single_frame_glitch_is_rejected():
     m = engaged_mapper()
     _, t = feed(m, 0.0, 10, wrist=WRIST0)

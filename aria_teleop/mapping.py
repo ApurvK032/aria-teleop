@@ -3,10 +3,13 @@
 No simulator dependency, so the same mapper can later drive the real WidowX AI.
 
 Mapping (all relative to the moment the clutch engages):
-    p_target = p_E0 + scale * A @ (p_wrist - p_wrist0)
-    R_target = A @ (R_wrist @ R_wrist0^T) @ A^T @ R_E0
+    R_target = shape(A @ (R_wrist @ R_wrist0^T) @ A^T) @ R_E0
+    p_target = p_E0 - R_E0 @ d + scale * A @ (p_wrist - p_wrist0) + R_target @ d
 where A rotates room-frame vectors into the robot base frame, built from gravity
-and the direction the operator's head faces at engage time.
+and the direction the operator's head faces at engage time. shape() optionally
+applies a soft deadband and a gain to the rotation angle (identity by default).
+d = (pivot_offset_m, 0, 0) is the gripper tip seen from the point the gripper
+turns about; with d = 0 (the default) it turns about its tip.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import math
 
 import numpy as np
 
+from .eyes import SIDES, EyeState
 from .filters import OneEuroFilter, OneEuroRotationFilter
 from .fusion import HandFrame, HandState
 from .geometry import from_rotvec, heading_frame, interpolate_rotation, rotvec
@@ -29,9 +33,15 @@ OTHER_HAND = {"left": "right", "right": "left"}
 @dataclass
 class TeleopConfig:
     hand: str = "right"  # hand that drives the arm
-    clutch: str = "key"  # "key": toggle from the viewer; "pinch": other hand pinched = engaged
+    # "key": toggle from the viewer; "pinch": other hand pinched = engaged;
+    # "eyes": the viewer key arms, a left wink engages, a right wink releases
+    clutch: str = "key"
     scale: float = 1.0  # robot metres per hand metre
     use_rotation: bool = True  # False keeps the gripper orientation fixed
+    rotation_scale: float = 1.0  # gripper turn per wrist turn; below 1 is calmer but has less range per engage
+    rotation_deadband_deg: float = 0.0  # wrist turn from the engage pose that is ignored (soft: no jump past it)
+    pivot_offset_m: float = 0.0  # the gripper turns about a point this far behind its tip, like a hand
+    # about its wrist; 0.156 is the WidowX AI's last wrist joint. 0 turns it about the tip.
     yaw_offset_deg: float = 0.0  # set to 180 if you face the robot instead of standing behind it
     min_confidence: float = 0.3
     max_hand_speed: float = 3.0  # m/s; faster wrist jumps are treated as tracking glitches
@@ -42,6 +52,10 @@ class TeleopConfig:
     pinch_open_m: float = 0.08  # ... and to a fully open gripper
     clutch_pinch_on_m: float = 0.025  # "pinch" clutch engages below this ...
     clutch_pinch_off_m: float = 0.045  # ... and releases above this
+    wink_s: float = 0.6  # "eyes" clutch: one eye closed this long, the other open, is a wink
+    eyes_pause_s: float = 0.5  # both eyes closed this long (longer than a blink): robot holds still
+    eyes_release_s: float = 2.0  # ... and this long: release the clutch
+    eyes_stale_s: float = 0.5  # no eye data for this long while engaged: hold still
     pos_min_cutoff: float = 1.5  # One Euro filter, Hz
     pos_beta: float = 10.0
     rot_min_cutoff: float = 1.5
@@ -56,6 +70,7 @@ class Status(str, Enum):
     IDLE = "idle"  # clutch released: robot holds
     TRACKING = "tracking"  # following the hand
     HOLD = "hold"  # clutch engaged but hand lost: robot holds until it returns
+    PAUSED = "paused"  # "eyes" clutch engaged but eyes closed or not tracked: robot holds
 
 
 @dataclass
@@ -82,6 +97,18 @@ def pinch_distance(hand: HandState | None) -> float | None:
     return float(np.linalg.norm(hand.landmarks_room[THUMB_TIP] - hand.landmarks_room[INDEX_TIP]))
 
 
+def shape_rotation(R: np.ndarray, cfg: TeleopConfig) -> np.ndarray:
+    """Apply the soft deadband, then the gain, to a relative rotation's angle; the axis is kept."""
+    if cfg.rotation_scale == 1.0 and cfg.rotation_deadband_deg == 0.0:
+        return R
+    v = rotvec(R)
+    angle = float(np.linalg.norm(v))
+    shaped = min(max(0.0, angle - math.radians(cfg.rotation_deadband_deg)) * cfg.rotation_scale, math.pi)
+    if shaped == 0.0:
+        return np.eye(3)
+    return from_rotvec(v * (shaped / angle))
+
+
 def clamp_to_workspace(p: np.ndarray, cfg: TeleopConfig) -> np.ndarray:
     p = np.clip(p, cfg.workspace_min, cfg.workspace_max)
     shoulder = np.asarray(cfg.shoulder)
@@ -103,6 +130,10 @@ class TeleopMapper:
         self._key_engaged = False
         self._pinch_engaged = False
         self._clutch_hand_seen_at = -math.inf
+        self._armed = False  # "eyes" clutch: winks only count while armed
+        self._eyes_engaged = False
+        # A wink fires once; the eye has to reopen before it can fire again.
+        self._wink_spent = {side: False for side in SIDES}
         self._anchor: _Anchor | None = None
         # Operator heading, taken from the head at the first engage and kept for
         # the VIO session so re-clutching doesn't rotate the mapping with head sway.
@@ -124,10 +155,16 @@ class TeleopMapper:
 
     # Clutch input. Called from the viewer's key callback thread; plain bool writes.
     def toggle_clutch(self) -> None:
-        self._key_engaged = not self._key_engaged
+        if self.cfg.clutch == "eyes":
+            self._armed = not self._armed  # disarming also releases (see _update_eye_clutch)
+        else:
+            self._key_engaged = not self._key_engaged
 
     def set_clutch(self, engaged: bool) -> None:
-        self._key_engaged = engaged
+        if self.cfg.clutch == "eyes":
+            self._armed = self._eyes_engaged = engaged
+        else:
+            self._key_engaged = engaged
 
     def reset_heading(self) -> None:
         """Re-take "forward" from where the head faces at the next engage."""
@@ -135,10 +172,19 @@ class TeleopMapper:
         self._anchor = None
 
     @property
-    def engaged(self) -> bool:
-        return self._pinch_engaged if self.cfg.clutch == "pinch" else self._key_engaged
+    def armed(self) -> bool:
+        """Only meaningful for the "eyes" clutch."""
+        return self.cfg.clutch == "eyes" and self._armed
 
-    def update(self, frame: HandFrame | None, now: float) -> TeleopCommand:
+    @property
+    def engaged(self) -> bool:
+        if self.cfg.clutch == "pinch":
+            return self._pinch_engaged
+        if self.cfg.clutch == "eyes":
+            return self._armed and self._eyes_engaged
+        return self._key_engaged
+
+    def update(self, frame: HandFrame | None, now: float, eyes: EyeState | None = None) -> TeleopCommand:
         cfg = self.cfg
         fresh = frame is not None and now - frame.received_at <= cfg.stale_after_s
         hand = None
@@ -148,12 +194,22 @@ class TeleopMapper:
             hand = self._accept(frame)
         elif not fresh:
             self._pinch_engaged = False  # no data at all: release the deadman
+        paused = self._update_eye_clutch(eyes, now)
 
         if not self.engaged:
             self._anchor = None
             self._pos_filter.reset()
             self._rot_filter.reset()
             self.status = Status.IDLE
+            return self._command()
+
+        if paused:
+            # Not looking: hold still, and re-anchor once the eyes open so hand
+            # motion made while the operator couldn't see is ignored.
+            self._anchor = None
+            self._pos_filter.reset()
+            self._rot_filter.reset()
+            self.status = Status.PAUSED
             return self._command()
 
         if hand is not None:
@@ -189,6 +245,33 @@ class TeleopMapper:
             self._pinch_engaged = True
         elif d > cfg.clutch_pinch_off_m:
             self._pinch_engaged = False
+
+    def _update_eye_clutch(self, eyes: EyeState | None, now: float) -> bool:
+        """Apply wink commands; returns True while the robot must hold for the eyes."""
+        cfg = self.cfg
+        if cfg.clutch != "eyes":
+            return False
+        if not self._armed:
+            self._eyes_engaged = False
+            return False
+        if eyes is None or now - eyes.received_at > cfg.eyes_stale_s:
+            return True  # eye tracking lost: can't tell whether the operator is looking
+        closed = {"left": eyes.left_closed_s, "right": eyes.right_closed_s}
+        for side in SIDES:
+            if closed[side] == 0.0:
+                self._wink_spent[side] = False
+        if eyes.both_closed_s >= cfg.eyes_pause_s:
+            # A real both-eyes closure, not a blink: when one eye opens first, the
+            # other one still being closed must not count as a wink.
+            self._wink_spent = {side: True for side in SIDES}
+            if eyes.both_closed_s >= cfg.eyes_release_s:
+                self._eyes_engaged = False
+            return True
+        for side, other in (("left", "right"), ("right", "left")):
+            if closed[side] >= cfg.wink_s and closed[other] == 0.0 and not self._wink_spent[side]:
+                self._wink_spent[side] = True
+                self._eyes_engaged = side == "left"  # left wink engages, right wink releases
+        return False
 
     def _accept(self, frame: HandFrame) -> HandState | None:
         """Gate one frame of the driving hand: missing, low confidence, or a glitch."""
@@ -236,11 +319,14 @@ class TeleopMapper:
             self.anchors += 1
         self._last_good_at = now
         a = self._anchor
-        self._target_p = clamp_to_workspace(
-            a.target_position + cfg.scale * a.A @ (p - a.wrist_position), cfg
-        )
         if cfg.use_rotation:
-            self._target_R = a.A @ (R @ a.wrist_rotation.T) @ a.A.T @ a.target_rotation
+            turn = shape_rotation(a.A @ (R @ a.wrist_rotation.T) @ a.A.T, cfg)  # in the robot base frame
+            self._target_R = turn @ a.target_rotation
+        # The wrist's motion moves the pivot; the tip sits pivot_offset_m ahead of it
+        # along the gripper's x axis, so turning about the pivot swings the tip.
+        tip = np.array([cfg.pivot_offset_m, 0.0, 0.0])
+        pivot = a.target_position - a.target_rotation @ tip + cfg.scale * a.A @ (p - a.wrist_position)
+        self._target_p = clamp_to_workspace(pivot + self._target_R @ tip, cfg)
         d = pinch_distance(hand)
         if d is not None:
             self.last_pinch = d
