@@ -1,167 +1,248 @@
-# aria-teleop
+<h1 align="center">aria-teleop</h1>
 
-Drive a Trossen WidowX AI arm in MuJoCo with the hand tracking that runs on Aria Gen 2 glasses. Point your hand and the gripper follows; pinch your thumb and index finger and it closes.
+<p align="center">
+  <b>Drive a robot arm with Meta Aria Gen 2 glasses: your hand steers, your eyes are the clutch.</b>
+</p>
 
+<p align="center">
+  <a href="https://github.com/ApurvK032/aria-teleop/actions/workflows/tests.yml"><img src="https://github.com/ApurvK032/aria-teleop/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
+  <img src="https://img.shields.io/badge/python-3.10%E2%80%933.12-3776ab" alt="Python 3.10–3.12">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2a78d6" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <img src="docs/media/sim_demo.gif" width="560" alt="WidowX AI in MuJoCo following a hand: the green cube is the commanded target, the orange trail the gripper's path">
+</p>
+
+**aria-teleop** teleoperates a [Trossen WidowX AI](https://www.trossenrobotics.com/widowx-ai) arm, in
+[MuJoCo](https://mujoco.org) or on hardware, from the sensing that runs *on* the Aria Gen 2 glasses.
+There's nothing to hold and nothing to wear on your hands: the glasses track your wrist and fingers,
+cancel out your own head motion, and read your eyes, so a deliberate wink starts and stops control.
+
+- **Hands-free input.** On-device hand tracking (30 Hz): the wrist pose steers the gripper, and the
+  thumb–index distance opens and closes it. No gloves, controllers or markers.
+- **Head-motion compensation.** Every hand frame is placed in the room frame with the glasses' ~800 Hz
+  visual-inertial head pose, so looking around doesn't move the robot.
+- **Eye-gesture clutch.** Wink left to engage, wink right to release, close both eyes to pause; the
+  glasses announce each change. Ordinary blinks are ignored.
+- **A real-arm pipeline built for smoothness.** A fixed-rate 200 Hz loop with jerk-limited joint shaping,
+  an independent safety gate, slow start-up and shutdown moves, and fault handling.
+- **Simulation first.** A scripted mock source, a MuJoCo preview of exactly what the real arm would be
+  sent, and a dry run that connects to the arm without moving it.
+
+## Results
+
+From the first session on hardware: Aria Gen 2 over USB, WidowX AI with controller firmware 1.8.3,
+at the conservative first-run settings (joints capped at 0.5 rad/s, robot moving at 0.5× the hand).
+
+| | |
+|---|---|
+| Hand tracking / head pose / eye tracking | 30 Hz / ~800 Hz / 30 Hz, hand confidence ~1.0 |
+| Arm vs. its commanded target | median 1.2 mm, 86% of samples within 3 mm, 90th percentile 4 mm; worst 15 mm, while joints were at the speed cap |
+| Eye clutch | all 6 winks in the logged real-arm runs acted on (3 engage, 3 release); closed-eye pause and re-anchor checked in the dry run |
+| Faults, rejected frames | none |
+| Operator's verdict | smooth, with no visible jerks at these settings |
+
+Tracking error is sampled once a second over ~75 s of driving in two logged runs. Not measured yet:
+hand-to-robot accuracy against ground truth, end-to-end latency, task success, and behaviour at full
+speed and 1:1 scale.
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph G["Aria Gen 2 · on-device"]
+        H["Hand tracking<br/>30 Hz"]
+        V["Head pose (VIO)<br/>~800 Hz"]
+        E["Eye tracking<br/>30 Hz"]
+    end
+    H --> F["HandFuser<br/>head-motion compensation"]
+    V --> F
+    F --> M["TeleopMapper<br/>gating · filtering · clutch · mapping"]
+    E --> M
+    M --> P["Arm pipeline · 200 Hz<br/>smoothing → IK → jerk-limited shaper → safety gate"]
+    P --> S["MuJoCo"]
+    P --> R["WidowX AI"]
 ```
-Aria Gen 2 ──USB──▶ HandFuser ──▶ TeleopMapper ──▶ PoseSmoother ──▶ IK ──▶ WidowX AI (MuJoCo)
- hands 30 Hz         head-motion     gate, filter,     30 Hz → 500 Hz,
- head pose           compensation    clutch, mapping   speed cap
-```
 
-- **fusion.py**: converts hand poses from the glasses' frame into the room frame, using the on-device VIO head pose at the hand's timestamp. Turning your head doesn't move the robot.
-- **mapping.py**: drops low-confidence frames and single-frame glitches, then applies One Euro filtering. Motion is relative and clutched: when you engage, the robot stays put, and after that it copies how your hand moves. Your thumb–index distance sets the gripper opening.
-- **sim.py**: runs Trossen's follow-target scene and IK controller. The cube shows the target. It's grey when idle, green when tracking, and orange when holding because the hand was lost.
-- **sources.py**: `AriaSource` streams live from the glasses through the Client SDK. `MockSource` is a scripted hand seen from a swaying head, so you can test without the glasses.
+| Module | Role |
+|---|---|
+| [`sources.py`](aria_teleop/sources.py) | `AriaSource` streams hands, head pose, eye tracking and calibration through the Aria Gen 2 Client SDK; `MockSource` fakes them for testing. |
+| [`fusion.py`](aria_teleop/fusion.py) | Composes each device-frame hand with the head pose at the same timestamp: `T_room_wrist = T_room_device(t) · T_device_wrist(t)`. |
+| [`eyes.py`](aria_teleop/eyes.py) | Debounces per-eye open/closed flags into closure durations. |
+| [`mapping.py`](aria_teleop/mapping.py) | Drops low-confidence frames and single-frame glitches, One Euro filtering, the clutch, and relative mapping: when you engage the robot stays put, then copies how your hand moves. |
+| [`arm.py`](aria_teleop/arm.py) | The real-arm pipeline: pose smoothing, IK on a kinematic model, a critically damped jerk-limited `JointShaper`, an independent safety gate, and the Trossen driver backend. |
+| [`sim.py`](aria_teleop/sim.py) | Trossen's MuJoCo scene and IK controller, the real-time loop, status output and keyboard input. |
+| [`hand_viewer.py`](aria_teleop/hand_viewer.py) | Optional [Rerun](https://rerun.io) view of both tracked hands, head pose, confidence and pinch. |
 
-## Install (Ubuntu 22.04 / 24.04, Python 3.10–3.12)
+## Installation
+
+Linux (Ubuntu 22.04 / 24.04) with Python 3.10–3.12:
 
 ```bash
+git clone https://github.com/ApurvK032/aria-teleop.git && cd aria-teleop
 python3 -m venv .venv && source .venv/bin/activate
-git clone https://github.com/TrossenRobotics/trossen_arm_mujoco.git
-pip install -e trossen_arm_mujoco
-pip install -e ".[aria,test]"
+git clone https://github.com/TrossenRobotics/trossen_arm_mujoco.git ../trossen_arm_mujoco
+pip install -e ../trossen_arm_mujoco          # must be editable: it carries the IK module
+pip install -e ".[aria,test]"                 # add ",arm" for the real arm (trossen-arm driver)
+pytest -q
 ```
 
-Install `trossen_arm_mujoco` with `-e`. A regular install leaves out its `src/` module, which holds the IK controller.
-
-One-time setup for the glasses (approve the pairing in the Companion App):
+One-time setup for the glasses (approve the pairing in the Aria companion app):
 
 ```bash
 aria_doctor
 aria_gen2 auth pair
-aria_gen2 device list
+aria_gen2 device list        # <serial> @ <ip>: use the IP as --device-ip
 ```
 
-## Run
+## Quick start
 
-Start with the mock, so you can check the sim on its own:
+**1. No hardware:** a scripted hand, seen from a deliberately swaying head, drives the simulated arm.
 
 ```bash
-python -m aria_teleop --source mock
+python -m aria_teleop --source mock                                    # MuJoCo viewer; SPACE engages
+python -m aria_teleop --source mock --headless --duration 8 --auto-engage 1
 ```
 
-Then with the glasses plugged in over USB:
+**2. With the glasses**, in simulation:
 
 ```bash
-python -m aria_teleop --source aria
+python -m aria_teleop --source aria --device-ip <GLASSES_IP> --clutch eyes
 ```
 
-| Key in the viewer or the terminal | Action |
+**3. On the real arm.** Follow [docs/real-arm-setup.md](docs/real-arm-setup.md) first (network, limits,
+dry run). Then:
+
+```bash
+python -m aria_teleop --source aria --device-ip <GLASSES_IP> --clutch eyes --headless \
+    --arm real --enable-motion --robot-ip <ROBOT_IP> --arm-max-velocity 0.5 --scale 0.5
+```
+
+The settings that felt best so far: `--rotation-scale 0.75 --rotation-deadband 5 --max-angular-speed 2
+--pivot-offset 0.156 --pinch-open 0.10`.
+
+## Controls
+
+Keys work in the MuJoCo viewer and in the terminal (the terminal also with `--headless`):
+
+| Key | Action |
 |---|---|
-| `SPACE` | engage / release the clutch |
+| `SPACE` | engage / release the clutch; with `--clutch eyes`, arm / disarm (disarmed, the robot never moves) |
 | `H` | reset heading: "forward" is taken from where you face at the next engage |
+| `Ctrl+C` | stop; on the real arm it holds, then returns slowly to rest. Press it **once** |
 
-The terminal keys also work with `--headless`, so you can drive the real arm without a viewer window.
-
-Before engaging, stand behind the arm facing the way it points. If you face the robot instead, add `--yaw-offset 180`. Keep your hand where the glasses can see it.
-
-`--clutch pinch` turns your other hand into a deadman switch: pinch it to drive, open it to stop.
-
-`--clutch eyes` drives the clutch with the glasses' on-device eye tracking:
+With `--clutch eyes`:
 
 | Gesture | Action |
 |---|---|
-| `SPACE` in the viewer | arm / disarm. Disarmed, the robot never moves |
-| wink your left eye (hold ~0.6 s, right eye open) | engage |
+| wink your left eye (~0.6 s, right eye open) | engage |
 | wink your right eye | release |
-| close both eyes for longer than a blink (0.5 s) | pause at once: the robot holds; when you open your eyes it re-anchors, so hand motion you made without looking is ignored |
+| close both eyes for longer than a blink (0.5 s) | pause at once; on reopening, the hand re-anchors so motion made without looking is ignored |
 | keep both eyes closed for 2 s | release |
 
-Losing eye-tracking data also pauses. The glasses say "engaged", "paused", "released" and so on (`--no-speak` turns this off), and the cube turns blue while paused. Tune the wink time with `--wink-s`. Ordinary blinks were measured at up to ~0.4 s, so they don't pause the robot. A wink only counts if the other eye stays open; if both eyes close together for 0.5 s, the gesture is treated as closed eyes, not a wink.
+`--clutch pinch` makes your other hand a deadman switch instead: pinch it to drive, open it to stop.
+Stand behind the arm facing the way it points (or add `--yaw-offset 180` if you face it).
 
-A status line prints once a second:
+A status line prints once a second. This one is from a real-arm run:
 
 ```
-[  12.0s] tracking clutch=on  hands 30.0Hz head   800Hz conf 0.93 pinch  4.5cm target (+0.320,-0.050,+0.210) err   4.1mm rejected 0 anchors 1
+[  13.0s] tracking clutch=on  hands 30.0Hz head   796Hz eyes 30.0Hz conf 1.00 pinch  3.9cm target (+0.398,+0.011,+0.081) err   1.3mm joints 0.35/0.50rad/s limit j2  25deg rejected 0 anchors 1
 ```
 
-`--hand-viewer` opens a Rerun window with both tracked hands (after head-motion compensation, so turning your head shouldn't move them), the head pose, and live plots of confidence and pinch distance. You can read your pinch values there without engaging. The Rerun viewer takes about one CPU core, so on a slow laptop use it to check tracking and leave it off for teleop.
-
-## First live run: things to check
-
-The live Aria path has been tested against the real SDK types but not against real glasses yet. Watch the status line for these:
-
-1. **`hands` around 30 Hz.** The default `--profile profile9` streams hand tracking at 30 Hz.
-2. **`head` rate.** About 800 Hz means the high-frequency VIO pose is streaming. About 10 Hz means the profile doesn't include it and the code fell back to the 10 Hz VIO output. That still works, but head-motion compensation is coarser.
-3. **`conf`.** The on-device confidence scale isn't documented. If frames are being dropped, lower `--min-confidence`.
-4. **Direction.** If pushing your hand forward moves the arm sideways, set `--yaw-offset` (degrees, positive turns left), or press `H` and re-engage while facing the arm.
-5. **`pinch`.** Read your own fully-closed and fully-open values, then pass them as `--pinch-closed` and `--pinch-open`.
-
-## Useful flags
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--hand` | `right` | hand that drives the arm |
-| `--scale` | `1.0` | robot metres per hand metre (below 1 for precision) |
-| `--no-rotation` | off | follow position only, keep the gripper orientation fixed |
-| `--rotation-scale` | `1.0` | gripper turn per wrist turn; below 1 is calmer, with less range per engage (re-engage to turn further) |
-| `--rotation-deadband` | `0` | degrees of wrist turn from the engage pose to ignore, so the wrist's own small twists while you move don't turn the gripper; it's soft, so nothing jumps past it |
-| `--pivot-offset` | `0` | turn the gripper about a point this many metres behind its tip, the way your hand turns about your wrist; `0.156` is the arm's last wrist joint, `0` turns it about the fingertips |
-| `--max-speed` | `0.6` | end-effector speed cap, m/s |
-| `--max-angular-speed` | `4.0` | gripper turn-speed cap, rad/s |
-| `--joint-speed-limit` | none | sim: warn when a joint moves faster than this, rad/s (one value, or six comma-separated for joint_0..5) |
-| `--cap-joint-speed` | off | sim: also hold the IK to `--joint-speed-limit` |
-| `--joint-limit-margin` | `5` | sim: warn when a joint gets this many degrees from the end of its range |
-| `--interface` | `usb` | `wifi_sta` / `wifi_sap` add latency; use USB for teleop |
-| `--no-start-streaming` | off | only run the receiver, if you started streaming with `aria_gen2 streaming start` |
-| `--hand-viewer` | off | Rerun window with the tracked hands; `--hand-viewer-memory` caps its memory (default `1GB`) |
-| `--clutch eyes --wink-s 0.6` | | eye-gesture clutch, and how long a wink must be held |
-| `--headless --duration 10 --auto-engage 1` | | run without the viewer, for testing |
-
-The rest (filter cutoffs, glitch threshold, workspace box, reach limit) are in `TeleopConfig` in `aria_teleop/mapping.py`.
-
-If the gripper turns too much or when you don't mean it, a starting point measured on one operator is `--rotation-scale 0.5 --rotation-deadband 5 --max-angular-speed 2`. Their wrist twisted by itself about 6–9 degrees while they moved their hand, and held-still jitter was about 0.5 degrees. Try `--pivot-offset 0.156` against `0` to see which feels more like your own hand.
-
-### Simulated vs. real arm
-
-The simulator lets joints move as fast as the IK asks; the real arm has per-joint speed limits and faults with `joint_limit_exceeded`. To see trouble before it reaches hardware, watch `joints 0.21/0.74rad/s limit j3 23deg` in the status line. It shows the peak shoulder/elbow and wrist joint speeds over the last second, and the joint closest to the end of its range. While you're driving the arm, a `WARNING joints:` line appears when a joint passes `--joint-speed-limit` or comes within `--joint-limit-margin` of its range end. The run ends with each joint's peak speed. Read the real limits from the arm with `TrossenArmDriver.get_joint_limits()` (`velocity_max`), then pass them as `--joint-speed-limit`. Add `--cap-joint-speed` to make the sim move only as fast as the real arm could; the arm then lags fast hand motion instead of whipping. With `--pivot-offset 0` (turning about the fingertips), wrist turns swing the shoulder and elbow several times harder than with `0.156`.
-
-## Real arm
+## The real arm
 
 `--arm` chooses where joint commands come from and go to:
 
 | `--arm` | What happens |
 |---|---|
-| `sim` (default) | The simulator's own IK drives the MuJoCo arm, as before |
-| `preview` | The real-arm pipeline drives the MuJoCo arm: use it to see what the real arm will be sent |
-| `dry-run` | Connects to the real arm, reads its state and limits, and computes every command, but never switches the joints to position mode or sends anything; the viewer shows the commands |
-| `real` | Drives the real arm. Needs `--enable-motion` |
+| `sim` (default) | MuJoCo's own IK drives the simulated arm |
+| `preview` | the real-arm pipeline drives the MuJoCo arm: see what the real arm would be sent |
+| `dry-run` | connects to the arm and reads its state and limits; computes every command but never sends one |
+| `real` | drives the arm; requires `--enable-motion` |
 
-The pipeline (`aria_teleop/arm.py`) runs at a fixed 200 Hz, separate from the 30 Hz hand stream, so input timing never reaches the motors:
+Safety in the pipeline:
 
-```
-target pose -> PoseSmoother -> IK (on a kinematic model) -> JointShaper -> safety gate -> arm
-```
+- **Version check:** the driver's major.minor must match the controller firmware, or nothing starts.
+  An unreachable arm fails within 3 s.
+- **Slow transitions:** a slow, blocking move from wherever the arm is to the home pose on start. Exit,
+  Ctrl+C or any fault holds the arm, then returns it slowly to rest.
+- **Independent gate:** any non-finite, out-of-range or oversized joint command is rejected, separately
+  from the shaper that produced it.
+- **Tracking fault:** if the arm lags its command by more than 0.12 rad for 50 ms, teleop stops.
+- **Speed caps:** joint speeds are capped at `--arm-max-velocity` (default 1 rad/s for the shoulder and
+  elbow, 2 for the wrist) and at half of each joint's reported `velocity_max`.
 
-`JointShaper` follows the IK solution like a critically damped spring that matches the target's velocity. It caps every joint's velocity, acceleration and jerk, and never moves a joint faster than it can brake from before the target or the end of its range. On the mock it is 3–5x smoother than the simulator's own IK (RMS jerk), with about 2 mm more tracking error. Each command goes to the driver as a position goal 20 ms ahead, with velocity and acceleration feedforward.
+## Options
 
-Safety:
+| Flag | Default | Meaning |
+|---|---|---|
+| `--source` | `mock` | `mock` or `aria` |
+| `--device-ip` | | the glasses' IP (USB discovery is unreliable; pass it) |
+| `--clutch` | `key` | `key`, `pinch` or `eyes` |
+| `--hand` | `right` | the hand that drives the arm |
+| `--scale` | `1.0` | robot metres per hand metre |
+| `--rotation-scale` / `--rotation-deadband` | `1.0` / `0°` | how much of your wrist's turn the gripper follows, and how much to ignore |
+| `--pivot-offset` | `0` | turn the gripper about a point this far behind its tip (`0.156` = the last wrist joint) |
+| `--max-speed` / `--max-angular-speed` | `0.6 m/s` / `4 rad/s` | end-effector speed caps |
+| `--pinch-closed` / `--pinch-open` | `0.02` / `0.08 m` | thumb–index distances for a closed / open gripper |
+| `--arm` | `sim` | `sim`, `preview`, `dry-run`, `real` |
+| `--arm-max-velocity` | `1,1,1,2,2,2` | per-joint speed caps, rad/s (one value or six) |
+| `--arm-rate` | `200` | joint control rate, Hz |
+| `--hand-viewer` | off | Rerun view of the tracked hands (about one CPU core) |
+| `--headless` / `--duration` | | no viewer / stop after N seconds |
 
-- the driver's major.minor must match the arm's firmware (`pip install -e ".[arm]"` installs a 1.8.x driver), or nothing starts;
-- an unreachable arm fails within 3 s with a message, instead of hanging;
-- start-up is a slow (3 s) blocking move from wherever the arm is to the teleop home pose; exit, Ctrl+C or any fault holds the arm and then moves it slowly to rest (all zeros);
-- a gate independent of the shaper rejects any command that is non-finite, outside a joint's range, or a larger step than the speed caps allow;
-- if the arm stays more than 0.12 rad from its command for 50 ms, teleop stops (hold, then rest);
-- joint speeds are capped at `--arm-max-velocity` (default 1.0 rad/s for the shoulder/elbow joints, 2.0 for the wrist) and at `--arm-velocity-fraction` (0.5) of the `velocity_max` each joint reports.
+`python -m aria_teleop --help` lists the rest; the filter cutoffs, workspace box and reach limit are in
+`TeleopConfig` in [`mapping.py`](aria_teleop/mapping.py).
 
-Clutch release, closed eyes and a lost hand all hold the target, and the shaper brings the joints to a smooth stop. First session with the arm, power cut-off within reach:
+## Tools
+
+| Script | What it does |
+|---|---|
+| [`scripts/record_aria.py`](scripts/record_aria.py) | records 30 s of hands, head pose, eyes and RGB frames, with on-screen cues |
+| [`scripts/plot_recording.py`](scripts/plot_recording.py) | turns a recording into figures: the tracked hands drawn on the glasses' RGB view, head-motion compensation, the hand's path, and the eye clutch |
+| [`scripts/eye_monitor.py`](scripts/eye_monitor.py) | shows what the glasses report for each eye, and why each wink did or didn't count |
+| [`scripts/return_to_rest.py`](scripts/return_to_rest.py) | brings the arm slowly back to rest after an interrupted run |
+| [`scripts/render_sim_demo.py`](scripts/render_sim_demo.py) | renders the demo animation above, offscreen |
+
+## Development
 
 ```bash
-python -m aria_teleop --source aria --clutch eyes --arm preview      # check the motion in MuJoCo
-python -m aria_teleop --source aria --clutch eyes --arm dry-run --robot-ip 192.168.1.2
-python -m aria_teleop --source aria --clutch eyes --arm real --enable-motion --robot-ip 192.168.1.2
+pytest -q
 ```
 
-## Tests
+The 68 tests cover the geometry and filters, head-motion compensation, the mapper (clutch, heading,
+glitches, tracking loss, workspace, pinch), the eye tracker, the arm pipeline against a fake driver
+(call order, shaping, the safety gate), terminal input, and the full mock-to-MuJoCo loop. The MuJoCo
+tests are skipped when MuJoCo or `trossen_arm_mujoco` isn't installed. CI runs them on Python 3.10–3.12.
 
-```bash
-pytest
 ```
-
-These cover the geometry and filters, the head-motion compensation, the mapper (clutch, heading, glitches, tracking loss, workspace, pinch), and the full mock-to-MuJoCo loop. The sim tests are skipped when MuJoCo or `trossen_arm_mujoco` isn't installed.
+aria_teleop/   the package (python -m aria_teleop)
+scripts/       recording, figures, diagnostics, demo rendering
+tests/         pytest suite
+docs/          real-arm setup guide, README media
+```
 
 ## Troubleshooting
 
-- **`mujoco.FatalError: gladLoadGL error`**: run `export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6` (Trossen's documented fix).
+- **`mujoco.FatalError: gladLoadGL error`**: `export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6`.
 - **`GLIBCXX_3.4.31 not found` on Ubuntu 22.04**: install `g++-13` from the `ubuntu-toolchain-r/test` PPA.
-- **`No devices found`**: check the glasses are on and plugged in, then run `aria_gen2 device list` and `aria_doctor`.
+- **`No devices found`**: check the glasses are on and plugged in, then `aria_gen2 device list` and
+  `aria_doctor`. Pass `--device-ip`.
+- **The stream freezes** (hands, head and eyes at 0 Hz): the glasses dropped off USB. Use a port directly
+  on the PC, not a hub, and check `journalctl -k | grep -i usb`.
+- **Winks don't register**: run `scripts/eye_monitor.py` and hold the wink a full second.
+- **Pushing your hand forward moves the arm sideways**: set `--yaw-offset`, or press `H` and re-engage
+  while facing the arm.
+
+More in [docs/real-arm-setup.md](docs/real-arm-setup.md#known-quirks).
+
+## Acknowledgements
+
+Built on the [Project Aria](https://www.projectaria.com) Client SDK and `projectaria_tools` from Meta,
+Trossen Robotics' [`trossen_arm_mujoco`](https://github.com/TrossenRobotics/trossen_arm_mujoco) model and
+IK controller and the `trossen-arm` driver, [MuJoCo](https://mujoco.org), and [Rerun](https://rerun.io).
+
+## License
+
+[MIT](LICENSE). If you use this in research, [CITATION.cff](CITATION.cff) has the citation details.
