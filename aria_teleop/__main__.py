@@ -26,7 +26,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--clutch", choices=["key", "pinch", "eyes"], default="key",
                    help="key: SPACE in the viewer toggles; pinch: pinch the other hand to engage (deadman); "
                         "eyes: SPACE arms, left wink engages, right wink releases, both eyes closed pauses")
-    p.add_argument("--clutch-key", default=" ", help="viewer key that toggles (or, with eyes, arms) the clutch")
+    p.add_argument("--clutch-key", default=" ", help="viewer or terminal key that toggles (or, with eyes, arms) the clutch")
     p.add_argument("--wink-s", type=float, default=0.6, help="eyes clutch: how long a wink must be held, s")
     p.add_argument("--no-speak", action="store_true", help="eyes clutch: don't announce changes on the glasses")
     p.add_argument("--scale", type=float, default=1.0, help="robot metres per hand metre")
@@ -79,7 +79,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                       help="only run the receiver (streaming already started with aria_gen2)")
 
     test = p.add_argument_group("testing")
-    test.add_argument("--headless", action="store_true", help="no viewer")
+    test.add_argument("--headless", action="store_true", help="no viewer; use the terminal keys")
     test.add_argument("--duration", type=float, default=None, help="stop after this many seconds")
     test.add_argument("--auto-engage", type=float, default=None, metavar="SECONDS",
                       help="engage the clutch automatically after this many seconds")
