@@ -1,9 +1,23 @@
 [project]
 name = "aria-teleop"
 version = "0.1.0"
-description = "Teleoperate a Trossen WidowX AI arm (MuJoCo first) with Aria Gen 2 on-device hand tracking"
+description = "Teleoperate a Trossen WidowX AI arm with the on-device hand and eye tracking of Meta Aria Gen 2 glasses"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Apurv Kushwaha" }]
 requires-python = ">=3.10"
+keywords = ["teleoperation", "robotics", "hand-tracking", "project-aria", "mujoco", "widowx"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Human Machine Interfaces",
+]
 dependencies = [
   "numpy",
   "scipy>=1.13",
@@ -14,10 +28,18 @@ dependencies = [
 aria = ["projectaria-client-sdk"]
 # The driver's major.minor must match the arm controller's firmware (1.8.x here).
 arm = ["trossen-arm>=1.8,<1.9"]
+plots = ["matplotlib", "pillow"]
 test = ["pytest"]
 
+[project.scripts]
+aria-teleop = "aria_teleop.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/ApurvK032/aria-teleop"
+Issues = "https://github.com/ApurvK032/aria-teleop/issues"
+
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

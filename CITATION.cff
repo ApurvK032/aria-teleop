@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "aria-teleop: robot arm teleoperation with Meta Aria Gen 2 glasses"
+abstract: >-
+  Teleoperates a Trossen WidowX AI arm, in MuJoCo or on hardware, from the on-device hand tracking,
+  head pose and eye tracking of Meta Aria Gen 2 glasses, with an eye-gesture clutch.
+authors:
+  - family-names: Kushwaha
+    given-names: Apurv
+repository-code: "https://github.com/ApurvK032/aria-teleop"
+license: MIT
+version: 0.1.0
+keywords:
+  - teleoperation
+  - robotics
+  - hand tracking
+  - Project Aria
+  - MuJoCo

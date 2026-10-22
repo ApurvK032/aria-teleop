@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install Trossen's MuJoCo model and IK controller
+        # Must be an editable install: a regular one leaves out the src/ module that holds the IK.
+        run: |
+          git clone --depth 1 https://github.com/TrossenRobotics/trossen_arm_mujoco.git ../trossen_arm_mujoco
+          pip install -e ../trossen_arm_mujoco
+      - name: Install aria-teleop
+        run: pip install -e ".[test]" rerun-sdk
+      - name: Run tests
+        run: pytest -q
