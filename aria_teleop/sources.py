@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import timedelta
 import threading
 import time
+from typing import Callable
 
 import numpy as np
 
@@ -46,6 +47,7 @@ class AriaSource:
         port: int = 6768,
         min_pose_quality: float = 0.5,
         eyes: bool = False,
+        on_rgb: Callable | None = None,
     ):
         if interface not in self.INTERFACES:
             raise ValueError(f"interface must be one of {self.INTERFACES}")
@@ -58,6 +60,7 @@ class AriaSource:
         self.port = port
         self.min_pose_quality = min_pose_quality
         self.eyes = eyes
+        self.on_rgb = on_rgb  # RGB camera frames, decoded; off for teleop to keep CPU and memory low
         self._client = None  # must outlive the device: a collected client closes its connection
         self._device = None
         self._receiver = None
@@ -102,7 +105,7 @@ class AriaSource:
         server = sdk_gen2.HttpServerConfig()
         server.address = "0.0.0.0"  # 127.0.0.1 never sees the glasses' connection
         server.port = self.port
-        self._receiver = receiver.StreamReceiver(enable_image_decoding=False)
+        self._receiver = receiver.StreamReceiver(enable_image_decoding=self.on_rgb is not None)
         self._receiver.set_server_config(server)
         self._receiver.register_hand_pose_callback(self._guard("hand", self._on_hands))
         self._receiver.register_vio_high_frequency_callback(self._guard("vio_hf", self._on_vio_high_freq))
@@ -110,6 +113,8 @@ class AriaSource:
         self._receiver.register_device_calib_callback(self._guard("calib", self._on_calib))
         if self.eyes:
             self._receiver.register_eye_gaze_callback(self._guard("eyes", self._on_eyes))
+        if self.on_rgb is not None:
+            self._receiver.register_rgb_callback(self._guard("rgb", self.on_rgb))
         self._receiver.start_server()
         print(f"Aria: receiver listening on 0.0.0.0:{self.port}")
 
